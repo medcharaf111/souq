@@ -288,10 +288,33 @@ export interface CreateOrderResult {
   total?: { amount: number; currency: string };
 }
 
+async function getFirstCourierId(storeId: string): Promise<number | null> {
+  try {
+    const res = await sallaFetch(storeId, "/shipping/companies/");
+    if (!res.ok) return null;
+    const body = (await res.json().catch(() => ({}))) as {
+      data?: Array<{ id?: number | string; status?: string }>;
+    };
+    const active = (body.data ?? []).find((c) => !c.status || c.status === "active") ?? body.data?.[0];
+    if (!active?.id) return null;
+    return Number(active.id);
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Create an order on the merchant's Salla store with payment.status="pending_payment"
  * so Salla handles payment collection. Returns the checkout URL to redirect the
  * customer to.
+ *
+ * Salla requires `courier_id` and `ship_to` when delivery_method is "shipping".
+ * If the caller doesn't supply a courier, we auto-pick the first active
+ * shipping company from the merchant's configured list.
+ *
+ * Accepted payment methods default to ["cod"] (cash on delivery) because that's
+ * the only method universally enabled on Salla demo stores. Merchants who have
+ * enabled credit_card / mada / bank can override via args.acceptedMethods.
  */
 export async function createSallaOrder(args: {
   storeId: string;
@@ -299,7 +322,14 @@ export async function createSallaOrder(args: {
   items: CheckoutItem[];
   shipping?: ShippingAddress;
   courierId?: number;
+  acceptedMethods?: string[];
 }): Promise<CreateOrderResult> {
+  const accepted = args.acceptedMethods ?? ["cod"];
+  let courierId = args.courierId ?? null;
+  if (args.shipping && !courierId) {
+    courierId = await getFirstCourierId(args.storeId);
+  }
+
   const payload: Record<string, unknown> = {
     customer: { id: Number(args.sallaCustomerId) },
     products: args.items.map((it) => ({
@@ -309,11 +339,14 @@ export async function createSallaOrder(args: {
     })),
     payment: {
       status: "pending_payment",
-      accepted_methods: ["credit_card", "mada", "cod"],
+      accepted_methods: accepted,
     },
     delivery_method: args.shipping ? "shipping" : null,
-    ...(args.shipping && args.courierId
-      ? { courier_id: args.courierId, ship_to: args.shipping }
+    ...(args.shipping
+      ? {
+          ship_to: args.shipping,
+          ...(courierId ? { courier_id: courierId } : {}),
+        }
       : {}),
   };
 
