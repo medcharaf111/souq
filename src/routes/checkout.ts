@@ -1,7 +1,13 @@
 import { Router } from "express";
 import { prisma } from "../lib/prisma";
 import { requireAuth } from "../lib/auth";
-import { createSallaOrder, ensureSallaCustomer, type ShippingAddress, type CheckoutItem } from "../lib/salla";
+import {
+  createSallaOrder,
+  CustomerProfileIncompleteError,
+  ensureSallaCustomer,
+  type ShippingAddress,
+  type CheckoutItem,
+} from "../lib/salla";
 
 interface RawSallaProductOption {
   id?: number | string;
@@ -58,10 +64,33 @@ router.post(
       return;
     }
 
-    const { shipping, courier_id: courierId } = (req.body ?? {}) as {
+    const {
+      shipping,
+      courier_id: courierId,
+      name: profileName,
+      phone: profilePhone,
+    } = (req.body ?? {}) as {
       shipping?: ShippingAddress;
       courier_id?: number;
+      name?: string;
+      phone?: string;
     };
+
+    // If the checkout form provided updated name/phone, persist them to the
+    // customer profile BEFORE provisioning on Salla. This is how missing
+    // fields get filled in for customers who signed up with just an email.
+    if (
+      (profileName && profileName.trim() !== (req.customer.name ?? "")) ||
+      (profilePhone && profilePhone !== (req.customer.phone ?? ""))
+    ) {
+      await prisma.customer.update({
+        where: { id: req.customer.id },
+        data: {
+          name: profileName?.trim() || req.customer.name,
+          phone: profilePhone?.trim() || req.customer.phone,
+        },
+      });
+    }
 
     try {
       // Phase B: ensure the local customer has a Salla customer counterpart.
@@ -93,6 +122,15 @@ router.post(
         total: order.total,
       });
     } catch (e) {
+      if (e instanceof CustomerProfileIncompleteError) {
+        res.status(400).json({
+          error: "profile_incomplete",
+          missing: e.fields,
+          message:
+            "Please provide your full name (first + last) and phone number to complete checkout.",
+        });
+        return;
+      }
       const message = e instanceof Error ? e.message : String(e);
       res.status(500).json({ error: message });
     }

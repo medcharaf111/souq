@@ -210,23 +210,74 @@ export async function syncProductsForStore(storeId: string): Promise<SyncResult>
 
 interface SallaCustomerCreatePayload {
   first_name: string;
-  last_name?: string;
-  mobile?: string;
-  mobile_code_country?: string;
+  last_name: string;
+  mobile: string;
+  mobile_code_country: string;
   email: string;
 }
 
 function splitName(full: string | null | undefined): { first: string; last: string } {
   const name = (full ?? "").trim();
-  if (!name) return { first: "Customer", last: "" };
+  if (!name) return { first: "", last: "" };
   const parts = name.split(/\s+/);
   return { first: parts[0], last: parts.slice(1).join(" ") };
+}
+
+/**
+ * Normalize a phone string into { country_code, local_number } accepted by
+ * Salla. Salla wants `mobile` as a national number (no + prefix, no country
+ * code) and `mobile_code_country` as an ISO-2 country code.
+ *
+ * Strategy: if the number starts with "+966" / "00966" / "966" → SA. Else,
+ * default to SA and strip any leading + and country digits we can recognize.
+ */
+function normalizeMobile(raw: string | null | undefined): { country: string; mobile: string } | null {
+  if (!raw) return null;
+  const s = raw.replace(/[\s-]/g, "");
+  let stripped = s;
+  let country = "SA";
+  if (stripped.startsWith("+")) stripped = stripped.slice(1);
+  else if (stripped.startsWith("00")) stripped = stripped.slice(2);
+  // Common GCC country codes
+  const map: Record<string, string> = {
+    "966": "SA",
+    "971": "AE",
+    "965": "KW",
+    "973": "BH",
+    "974": "QA",
+    "968": "OM",
+    "967": "YE",
+    "20": "EG",
+    "962": "JO",
+  };
+  for (const [code, iso] of Object.entries(map)) {
+    if (stripped.startsWith(code)) {
+      country = iso;
+      stripped = stripped.slice(code.length);
+      break;
+    }
+  }
+  // Salla typically wants the national number without leading 0
+  if (stripped.startsWith("0")) stripped = stripped.slice(1);
+  if (!/^\d{6,15}$/.test(stripped)) return null;
+  return { country, mobile: stripped };
+}
+
+export class CustomerProfileIncompleteError extends Error {
+  fields: string[];
+  constructor(fields: string[]) {
+    super(`Customer profile incomplete: ${fields.join(", ")}`);
+    this.fields = fields;
+  }
 }
 
 /**
  * Make sure our local Customer has a corresponding Salla customer record on
  * the merchant's store. Returns the Salla customer ID. Idempotent: if the
  * sallaCustomerId is already set on the local customer, returns it directly.
+ *
+ * Throws CustomerProfileIncompleteError if the local profile is missing
+ * fields Salla requires (last name, valid phone).
  */
 export async function ensureSallaCustomer(localCustomerId: string): Promise<string> {
   const local = await prisma.customer.findUnique({ where: { id: localCustomerId } });
@@ -234,12 +285,20 @@ export async function ensureSallaCustomer(localCustomerId: string): Promise<stri
   if (local.sallaCustomerId) return local.sallaCustomerId;
 
   const { first, last } = splitName(local.name);
+  const phone = normalizeMobile(local.phone);
+
+  const missing: string[] = [];
+  if (!first) missing.push("first_name");
+  if (!last) missing.push("last_name");
+  if (!phone) missing.push("phone");
+  if (missing.length > 0) throw new CustomerProfileIncompleteError(missing);
+
   const payload: SallaCustomerCreatePayload = {
     first_name: first,
-    last_name: last || undefined,
+    last_name: last,
     email: local.email,
-    mobile: local.phone ?? undefined,
-    mobile_code_country: local.phone ? "SA" : undefined,
+    mobile: phone!.mobile,
+    mobile_code_country: phone!.country,
   };
 
   const res = await sallaFetch(local.storeId, "/customers", {
