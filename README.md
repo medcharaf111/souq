@@ -1,6 +1,6 @@
 # souq
 
-Backend for the Salla multi-vendor marketplace. Express + Prisma + SQLite, talks to Salla via Partner OAuth.
+Backend for the Salla multi-vendor marketplace. Express + Prisma + Postgres, talks to Salla via Partner OAuth.
 
 ## What it does
 
@@ -38,7 +38,7 @@ Backend listens on `PORT` (default 3000). For local dev, expose with `ngrok http
 
 - **Webhook signature verification is a TODO** in `src/routes/webhooks.ts`. Verify the HMAC header against your webhook secret before trusting any body fields.
 - **API routes are unauthenticated.** Anyone who reaches the backend can list stores and trigger syncs. Before going live, add an admin token middleware on `/api/stores/*` and a frontend-only header / session for the customer routes.
-- **Swap SQLite for Postgres** in production. Change `provider` and `url` in `prisma/schema.prisma`, set `DATABASE_URL` to a Postgres URI.
+- **Postgres on Railway**: add the Postgres plugin to your project; Railway auto-injects `DATABASE_URL` into the souq service. For local dev, run any Postgres (e.g. `docker run -d -p 5432:5432 -e POSTGRES_PASSWORD=postgres postgres:16`) and point `DATABASE_URL` at it.
 
 ## Companion frontend
 
