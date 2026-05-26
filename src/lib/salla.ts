@@ -205,3 +205,185 @@ export async function syncProductsForStore(storeId: string): Promise<SyncResult>
 
   return { storeId, pagesFetched, productsUpserted, durationMs: Date.now() - t0 };
 }
+
+// ─── Phase B: Salla customer provisioning ────────────────────────────────────
+
+interface SallaCustomerCreatePayload {
+  first_name: string;
+  last_name?: string;
+  mobile?: string;
+  mobile_code_country?: string;
+  email: string;
+}
+
+function splitName(full: string | null | undefined): { first: string; last: string } {
+  const name = (full ?? "").trim();
+  if (!name) return { first: "Customer", last: "" };
+  const parts = name.split(/\s+/);
+  return { first: parts[0], last: parts.slice(1).join(" ") };
+}
+
+/**
+ * Make sure our local Customer has a corresponding Salla customer record on
+ * the merchant's store. Returns the Salla customer ID. Idempotent: if the
+ * sallaCustomerId is already set on the local customer, returns it directly.
+ */
+export async function ensureSallaCustomer(localCustomerId: string): Promise<string> {
+  const local = await prisma.customer.findUnique({ where: { id: localCustomerId } });
+  if (!local) throw new Error(`Local customer ${localCustomerId} not found`);
+  if (local.sallaCustomerId) return local.sallaCustomerId;
+
+  const { first, last } = splitName(local.name);
+  const payload: SallaCustomerCreatePayload = {
+    first_name: first,
+    last_name: last || undefined,
+    email: local.email,
+    mobile: local.phone ?? undefined,
+    mobile_code_country: local.phone ? "SA" : undefined,
+  };
+
+  const res = await sallaFetch(local.storeId, "/customers", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(
+      `Salla customer creation failed: ${res.status} ${JSON.stringify(body)}`
+    );
+  }
+  const sallaId =
+    (body as { data?: { id?: number | string } })?.data?.id?.toString() ?? null;
+  if (!sallaId) {
+    throw new Error(`Salla customer creation returned no id: ${JSON.stringify(body)}`);
+  }
+  await prisma.customer.update({
+    where: { id: local.id },
+    data: { sallaCustomerId: sallaId },
+  });
+  return sallaId;
+}
+
+// ─── Phase C: Salla order creation ───────────────────────────────────────────
+
+export interface ShippingAddress {
+  country?: string;
+  city?: string;
+  street?: string;
+  block?: string;
+  postal_code?: string;
+}
+
+export interface CheckoutItem {
+  sallaProductId: string;
+  qty: number;
+}
+
+export interface CreateOrderResult {
+  orderId: string;
+  checkoutUrl: string | null;
+  customerOrderUrl: string | null;
+  isPendingPayment: boolean;
+  total?: { amount: number; currency: string };
+}
+
+/**
+ * Create an order on the merchant's Salla store with payment.status="pending_payment"
+ * so Salla handles payment collection. Returns the checkout URL to redirect the
+ * customer to.
+ */
+export async function createSallaOrder(args: {
+  storeId: string;
+  sallaCustomerId: string;
+  items: CheckoutItem[];
+  shipping?: ShippingAddress;
+  courierId?: number;
+}): Promise<CreateOrderResult> {
+  const payload: Record<string, unknown> = {
+    customer: { id: Number(args.sallaCustomerId) },
+    products: args.items.map((it) => ({
+      identifier_type: "id",
+      identifier: Number(it.sallaProductId),
+      quantity: it.qty,
+    })),
+    payment: {
+      status: "pending_payment",
+      accepted_methods: ["credit_card", "mada", "cod"],
+    },
+    delivery_method: args.shipping ? "shipping" : null,
+    ...(args.shipping && args.courierId
+      ? { courier_id: args.courierId, ship_to: args.shipping }
+      : {}),
+  };
+
+  const res = await sallaFetch(args.storeId, "/orders", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const body = (await res.json().catch(() => ({}))) as {
+    data?: {
+      id?: number | string;
+      urls?: { checkout?: string; customer?: string };
+      is_pending_payment?: boolean;
+      total?: { amount?: number; currency?: string };
+    };
+  };
+  if (!res.ok || !body.data?.id) {
+    throw new Error(`Salla order creation failed: ${res.status} ${JSON.stringify(body)}`);
+  }
+  return {
+    orderId: body.data.id.toString(),
+    checkoutUrl: body.data.urls?.checkout ?? null,
+    customerOrderUrl: body.data.urls?.customer ?? null,
+    isPendingPayment: !!body.data.is_pending_payment,
+    total: body.data.total?.amount && body.data.total.currency
+      ? { amount: body.data.total.amount, currency: body.data.total.currency }
+      : undefined,
+  };
+}
+
+// ─── Phase D: Loyalty points read ────────────────────────────────────────────
+
+export interface LoyaltyPointsEntry {
+  name: string;
+  points: number;
+  used_points: number;
+  status: string;
+  order_id: string | null;
+  expiry_date: string | null;
+}
+
+export async function getLoyaltyPoints(
+  storeId: string,
+  sallaCustomerId: string
+): Promise<{ entries: LoyaltyPointsEntry[]; balance: number; usedTotal: number }> {
+  const res = await sallaFetch(
+    storeId,
+    `/customers/loyalty/points?customer_id=${encodeURIComponent(sallaCustomerId)}`
+  );
+  if (!res.ok) {
+    // Most common cause: store doesn't have the Customer Loyalty app installed.
+    // Treat as zero-balance rather than erroring.
+    return { entries: [], balance: 0, usedTotal: 0 };
+  }
+  const body = (await res.json().catch(() => ({}))) as {
+    data?: Array<Partial<LoyaltyPointsEntry>>;
+  };
+  const entries: LoyaltyPointsEntry[] = (body.data ?? []).map((e) => ({
+    name: e.name ?? "",
+    points: Number(e.points ?? 0),
+    used_points: Number(e.used_points ?? 0),
+    status: e.status ?? "",
+    order_id: e.order_id ?? null,
+    expiry_date: e.expiry_date ?? null,
+  }));
+  let balance = 0;
+  let usedTotal = 0;
+  for (const e of entries) {
+    balance += e.points - e.used_points;
+    usedTotal += e.used_points;
+  }
+  return { entries, balance, usedTotal };
+}
