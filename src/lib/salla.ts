@@ -224,40 +224,35 @@ function splitName(full: string | null | undefined): { first: string; last: stri
 }
 
 /**
- * Normalize a phone string into { country_code, local_number } accepted by
- * Salla. Salla wants `mobile` as a national number (no + prefix, no country
- * code) and `mobile_code_country` as an ISO-2 country code.
+ * Normalize a phone string for Salla's customer creation endpoint.
  *
- * Strategy: if the number starts with "+966" / "00966" / "966" → SA. Else,
- * default to SA and strip any leading + and country digits we can recognize.
+ * Per Salla docs (POST /admin/v2/customers):
+ *   - `mobile`: 9-ish digits, no country code, no leading zero
+ *   - `mobile_code_country`: numeric prefix WITH plus, e.g. "+966", "+967"
+ *
+ * Examples accepted by this helper:
+ *   "+966500000000"  → { country: "+966", mobile: "500000000" }
+ *   "00966500000000" → { country: "+966", mobile: "500000000" }
+ *   "0500000000" (Saudi local) → defaults to +966 → { country: "+966", mobile: "500000000" }
  */
 function normalizeMobile(raw: string | null | undefined): { country: string; mobile: string } | null {
   if (!raw) return null;
-  const s = raw.replace(/[\s-]/g, "");
-  let stripped = s;
-  let country = "SA";
+  let stripped = raw.replace(/[\s-]/g, "");
   if (stripped.startsWith("+")) stripped = stripped.slice(1);
   else if (stripped.startsWith("00")) stripped = stripped.slice(2);
-  // Common GCC country codes
-  const map: Record<string, string> = {
-    "966": "SA",
-    "971": "AE",
-    "965": "KW",
-    "973": "BH",
-    "974": "QA",
-    "968": "OM",
-    "967": "YE",
-    "20": "EG",
-    "962": "JO",
-  };
-  for (const [code, iso] of Object.entries(map)) {
+
+  // Numeric country prefixes we recognize (sorted longest-first so "966" wins
+  // over "9", etc.). Default fallback is "+966" (Saudi Arabia) since the
+  // current target market is Salla merchants headquartered in KSA.
+  const prefixes = ["966", "971", "965", "973", "974", "968", "967", "962", "20"];
+  let country = "+966";
+  for (const code of prefixes) {
     if (stripped.startsWith(code)) {
-      country = iso;
+      country = `+${code}`;
       stripped = stripped.slice(code.length);
       break;
     }
   }
-  // Salla typically wants the national number without leading 0
   if (stripped.startsWith("0")) stripped = stripped.slice(1);
   if (!/^\d{6,15}$/.test(stripped)) return null;
   return { country, mobile: stripped };
