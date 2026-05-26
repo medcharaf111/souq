@@ -5,6 +5,7 @@ import {
   createSallaOrder,
   CustomerProfileIncompleteError,
   ensureSallaCustomer,
+  SallaValidationError,
   type ShippingAddress,
   type CheckoutItem,
 } from "../lib/salla";
@@ -128,6 +129,14 @@ router.post(
           missing: e.fields,
           message:
             "Please provide your full name (first + last) and phone number to complete checkout.",
+        });
+        return;
+      }
+      if (e instanceof SallaValidationError) {
+        res.status(400).json({
+          error: "salla_validation",
+          fields: e.fields,
+          message: "Salla rejected the order — see fields below.",
         });
         return;
       }

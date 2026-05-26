@@ -271,6 +271,23 @@ export class CustomerProfileIncompleteError extends Error {
   }
 }
 
+export class SallaValidationError extends Error {
+  fields: Record<string, string[]>;
+  constructor(fields: Record<string, string[]>, scope: string) {
+    super(`Salla ${scope} validation failed`);
+    this.fields = fields;
+  }
+}
+
+function maybeSallaValidation(body: unknown, scope: string): SallaValidationError | null {
+  if (typeof body !== "object" || !body) return null;
+  const b = body as { status?: number; success?: boolean; error?: { fields?: Record<string, string[]> } };
+  if (b.success === false && b.error?.fields && typeof b.error.fields === "object") {
+    return new SallaValidationError(b.error.fields, scope);
+  }
+  return null;
+}
+
 /**
  * Make sure our local Customer has a corresponding Salla customer record on
  * the merchant's store. Returns the Salla customer ID. Idempotent: if the
@@ -308,6 +325,8 @@ export async function ensureSallaCustomer(localCustomerId: string): Promise<stri
   });
   const body = await res.json().catch(() => ({}));
   if (!res.ok) {
+    const validation = maybeSallaValidation(body, "customer");
+    if (validation) throw validation;
     throw new Error(
       `Salla customer creation failed: ${res.status} ${JSON.stringify(body)}`
     );
@@ -427,6 +446,8 @@ export async function createSallaOrder(args: {
     };
   };
   if (!res.ok || !body.data?.id) {
+    const validation = maybeSallaValidation(body, "order");
+    if (validation) throw validation;
     throw new Error(`Salla order creation failed: ${res.status} ${JSON.stringify(body)}`);
   }
   return {
