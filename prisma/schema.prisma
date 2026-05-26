@@ -45,4 +45,25 @@ model Product {
   @@unique([storeId, sallaId])
   @@index([storeId, status])
   @@index([storeId, syncedAt])
+  @@index([name])
+}
+
+// ─── Customer-side (shoppers on one merchant's branded app) ──────────────────
+// Each customer belongs to exactly one merchant. Same email can register
+// independently on different merchants — they're separate accounts. There is
+// no cross-merchant identity by design.
+
+model Customer {
+  id              String   @id @default(cuid())
+  storeId         String   // which merchant this customer shops with
+  email           String
+  phone           String?
+  name            String?
+  passwordHash    String
+  sallaCustomerId String?  // filled in lazily on first purchase intent (Phase B)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([storeId, email])
+  @@index([storeId])
 }

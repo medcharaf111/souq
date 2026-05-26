@@ -23,6 +23,7 @@ router.get("/stores", async (_req, res) => {
   });
 });
 
+
 // POST /api/stores/:storeId/sync — pull catalog from Salla into local cache.
 router.post("/stores/:storeId/sync", async (req, res) => {
   try {
