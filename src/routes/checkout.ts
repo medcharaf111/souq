@@ -70,12 +70,22 @@ router.post(
       courier_id: courierId,
       name: profileName,
       phone: profilePhone,
+      payment_method: paymentMethod,
     } = (req.body ?? {}) as {
       shipping?: ShippingAddress;
       courier_id?: number;
       name?: string;
       phone?: string;
+      payment_method?: "cod" | "online";
     };
+
+    // Map the customer's choice into Salla's accepted_methods array. "online"
+    // means anything the merchant has enabled that isn't COD — Salla's hosted
+    // checkout page lets the customer pick from those once they land there.
+    const acceptedMethods =
+      paymentMethod === "online"
+        ? ["credit_card", "mada", "bank", "apple_pay", "stc_pay"]
+        : ["cod"];
 
     // If the checkout form provided updated name/phone, persist them to the
     // customer profile BEFORE provisioning on Salla. This is how missing
@@ -109,6 +119,7 @@ router.post(
         })),
         shipping,
         courierId,
+        acceptedMethods,
       });
 
       // Empty the cart now — the order exists; if the customer bails on Salla's
