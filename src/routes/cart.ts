@@ -107,8 +107,9 @@ router.post(
 router.patch(
   "/cart/items/:id",
   requireAuth(async (req, res) => {
+    const itemId = String(req.params.id);
     const item = await prisma.cartItem.findUnique({
-      where: { id: req.params.id },
+      where: { id: itemId },
       include: { cart: true },
     });
     if (!item || item.cart.customerId !== req.customer.id) {
@@ -133,8 +134,9 @@ router.patch(
 router.delete(
   "/cart/items/:id",
   requireAuth(async (req, res) => {
+    const itemId = String(req.params.id);
     const item = await prisma.cartItem.findUnique({
-      where: { id: req.params.id },
+      where: { id: itemId },
       include: { cart: true },
     });
     if (!item || item.cart.customerId !== req.customer.id) {
