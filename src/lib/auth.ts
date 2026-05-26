@@ -1,6 +1,7 @@
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
-import type { Request } from "express";
+import type { NextFunction, Request, Response } from "express";
+import type { Customer } from "@prisma/client";
 import { prisma } from "./prisma";
 
 const SESSION_COOKIE = "souq_session";
@@ -63,4 +64,21 @@ export async function getCurrentCustomer(req: Request) {
   } catch {
     return null;
   }
+}
+
+export type AuthedRequest = Request & { customer: Customer };
+
+/** Wraps a route handler with a 401-on-no-session guard. */
+export function requireAuth(
+  handler: (req: AuthedRequest, res: Response, next: NextFunction) => Promise<void> | void
+) {
+  return async (req: Request, res: Response, next: NextFunction) => {
+    const customer = await getCurrentCustomer(req);
+    if (!customer) {
+      res.status(401).json({ error: "not authenticated" });
+      return;
+    }
+    (req as AuthedRequest).customer = customer;
+    return handler(req as AuthedRequest, res, next);
+  };
 }

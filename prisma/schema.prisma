@@ -41,6 +41,7 @@ model Product {
   syncedAt        DateTime @default(now())
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
+  cartItems       CartItem[]
 
   @@unique([storeId, sallaId])
   @@index([storeId, status])
@@ -63,7 +64,34 @@ model Customer {
   sallaCustomerId String?  // filled in lazily on first purchase intent (Phase B)
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
+  cart            Cart?
 
   @@unique([storeId, email])
   @@index([storeId])
+}
+
+model Cart {
+  id         String     @id @default(cuid())
+  customerId String     @unique
+  customer   Customer   @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  storeId    String     // denormalized — same as customer's storeId, indexed here for queries
+  items      CartItem[]
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+
+  @@index([storeId])
+}
+
+model CartItem {
+  id        String   @id @default(cuid())
+  cartId    String
+  cart      Cart     @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  productId String
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  qty       Int
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([cartId, productId])
+  @@index([cartId])
 }

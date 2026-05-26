@@ -4,6 +4,7 @@ import cookieParser from "cookie-parser";
 import cors from "cors";
 
 import authRouter from "./routes/auth";
+import cartRouter from "./routes/cart";
 import installRouter from "./routes/install";
 import oauthRouter from "./routes/oauth";
 import storesRouter from "./routes/stores";
@@ -26,6 +27,7 @@ app.get("/health", (_req, res) => {
 
 app.use("/", installRouter);
 app.use("/api", authRouter);
+app.use("/api", cartRouter);
 app.use("/api", oauthRouter);
 app.use("/api", storesRouter);
 app.use("/api", webhooksRouter);
