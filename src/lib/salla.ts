@@ -270,9 +270,11 @@ export async function ensureSallaCustomer(localCustomerId: string): Promise<stri
 export interface ShippingAddress {
   country?: string;
   city?: string;
-  street?: string;
-  block?: string;
+  block?: string;          // district / neighborhood
+  street_number?: string;  // street name (despite the misleading field name)
+  address_line?: string;   // building / apartment / "حقل وصف بيت الشحن"
   postal_code?: string;
+  geo_coordinates?: { latitude: number; longitude: number };
 }
 
 export interface CheckoutItem {
