@@ -278,6 +278,7 @@ export interface ShippingAddress {
 export interface CheckoutItem {
   sallaProductId: string;
   qty: number;
+  options?: Array<{ id: number; value: string[] | number[] }>;
 }
 
 export interface CreateOrderResult {
@@ -336,6 +337,7 @@ export async function createSallaOrder(args: {
       identifier_type: "id",
       identifier: Number(it.sallaProductId),
       quantity: it.qty,
+      ...(it.options && it.options.length > 0 ? { options: it.options } : {}),
     })),
     payment: {
       status: "pending_payment",

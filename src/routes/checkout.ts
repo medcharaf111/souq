@@ -1,7 +1,45 @@
 import { Router } from "express";
 import { prisma } from "../lib/prisma";
 import { requireAuth } from "../lib/auth";
-import { createSallaOrder, ensureSallaCustomer, type ShippingAddress } from "../lib/salla";
+import { createSallaOrder, ensureSallaCustomer, type ShippingAddress, type CheckoutItem } from "../lib/salla";
+
+interface RawSallaProductOption {
+  id?: number | string;
+  required?: boolean;
+  purpose?: string;
+  values?: Array<{ id?: number | string; is_out_of_stock?: boolean }>;
+}
+
+/**
+ * Parse the cached raw JSON for a Salla product and return a default options
+ * payload — one entry per option that either is required or is a variant
+ * selector. Prefers in-stock values; falls back to the first value if all are
+ * out of stock (Salla will reject if truly unavailable, surfacing the error).
+ *
+ * v1 limitation: customer can't pick option values yet; we auto-fill defaults.
+ */
+function defaultOptionsForProduct(rawJson: string): CheckoutItem["options"] {
+  let parsed: { options?: RawSallaProductOption[] };
+  try {
+    parsed = JSON.parse(rawJson);
+  } catch {
+    return undefined;
+  }
+  const opts = parsed.options ?? [];
+  const out: NonNullable<CheckoutItem["options"]> = [];
+  for (const o of opts) {
+    // Variants must always be selected; non-variants only if explicitly required.
+    const isVariant = o.purpose === "variants";
+    if (!o.required && !isVariant) continue;
+    const values = o.values ?? [];
+    const inStock = values.find((v) => !v.is_out_of_stock);
+    const chosen = inStock?.id ?? values[0]?.id;
+    if (o.id != null && chosen != null) {
+      out.push({ id: Number(o.id), value: [String(chosen)] });
+    }
+  }
+  return out.length > 0 ? out : undefined;
+}
 
 const router = Router();
 
@@ -37,6 +75,7 @@ router.post(
         items: cart.items.map((it) => ({
           sallaProductId: it.product.sallaId,
           qty: it.qty,
+          options: defaultOptionsForProduct(it.product.raw),
         })),
         shipping,
         courierId,
