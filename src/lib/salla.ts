@@ -364,6 +364,27 @@ export interface CreateOrderResult {
   total?: { amount: number; currency: string };
 }
 
+/**
+ * Fetch the merchant's enabled payment-method slugs. Returns null if the
+ * `payments.read` scope is missing or the call fails — caller should treat
+ * that as "I don't know, send everything and let Salla validate."
+ */
+export async function getEnabledPaymentMethodSlugs(storeId: string): Promise<string[] | null> {
+  try {
+    const res = await sallaFetch(storeId, "/payment/methods?status=enabled");
+    if (!res.ok) return null;
+    const body = (await res.json().catch(() => ({}))) as {
+      data?: Array<{ slug?: string }>;
+    };
+    const slugs = (body.data ?? [])
+      .map((m) => m.slug)
+      .filter((s): s is string => typeof s === "string");
+    return slugs.length > 0 ? slugs : null;
+  } catch {
+    return null;
+  }
+}
+
 async function getFirstCourierId(storeId: string): Promise<number | null> {
   try {
     const res = await sallaFetch(storeId, "/shipping/companies/");
@@ -400,7 +421,27 @@ export async function createSallaOrder(args: {
   courierId?: number;
   acceptedMethods?: string[];
 }): Promise<CreateOrderResult> {
-  const accepted = args.acceptedMethods ?? ["cod"];
+  // Filter requested payment methods to those the merchant has actually
+  // enabled. If we can't fetch the list (missing scope, etc.), fall back to
+  // sending the unfiltered request and let Salla return field-level errors —
+  // the frontend already surfaces those nicely.
+  let accepted = args.acceptedMethods ?? ["cod"];
+  const enabled = await getEnabledPaymentMethodSlugs(args.storeId);
+  if (enabled) {
+    const filtered = accepted.filter((m) => enabled.includes(m));
+    if (filtered.length === 0) {
+      throw new SallaValidationError(
+        {
+          "payment.accepted_methods": [
+            `None of the requested methods (${accepted.join(", ")}) are enabled on this store. Merchant has enabled: ${enabled.join(", ")}.`,
+          ],
+        },
+        "order"
+      );
+    }
+    accepted = filtered;
+  }
+
   let courierId = args.courierId ?? null;
   if (args.shipping && !courierId) {
     courierId = await getFirstCourierId(args.storeId);
