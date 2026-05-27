@@ -321,6 +321,30 @@ merchant only has bank enabled, Salla returns
 **Fix in place**: `getEnabledPaymentMethodSlugs()` filters the list when
 `payments.read` is granted. Gracefully falls back when the scope isn't there.
 
+### "Pay online" can resolve to a non-card method silently
+
+If the customer picks "Pay online" but the merchant only has, say, `bank`
+enabled, the filter narrows the request to `["bank"]`. Salla accepts and
+returns `is_pending_payment: false` (bank transfer is "merchant verifies
+manually," no Salla-hosted checkout). The frontend previously assumed
+`!is_pending_payment` = COD and showed COD copy — confusing for the customer.
+
+**Fix in place**:
+- Backend captures `payment_method` and `status.slug` from Salla's order
+  response and returns them on `/api/checkout`.
+- Backend ALSO logs the full Salla order response via
+  `console.log("[salla.order.created]", ...)` — search Railway logs to see
+  exactly what Salla picked for a given order.
+- Frontend passes `method=<slug>` to `/order/confirmed` and renders
+  method-specific copy (COD, bank, credit_card, mada, etc.). Falls back to a
+  generic "merchant will contact you" message for unknown methods.
+
+**Still TODO (improvement)**: if "Pay online" gets resolved to a non-card
+method, maybe surface a confirmation step before placing the order
+("Heads up: this merchant accepts bank transfer only — proceed?"). For now,
+the order is placed and the method-specific copy on /order/confirmed is the
+recovery point.
+
 ### Variants disguised as non-required options
 
 A Salla product option can have `required: false` but `purpose: "variants"` —
