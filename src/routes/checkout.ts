@@ -112,11 +112,24 @@ router.post(
       const order = await createSallaOrder({
         storeId: req.customer.storeId,
         sallaCustomerId,
-        items: cart.items.map((it) => ({
-          sallaProductId: it.product.sallaId,
-          qty: it.qty,
-          options: defaultOptionsForProduct(it.product.raw),
-        })),
+        items: cart.items.map((it) => {
+          // Prefer the customer's explicit option choices (saved from the
+          // product detail page); fall back to auto-picking sensible defaults
+          // for products that have required options but were added without a
+          // selection (e.g. legacy cart items from before the variant picker).
+          let chosen: CheckoutItem["options"] | undefined;
+          if (it.selectedOptions) {
+            try {
+              const parsed = JSON.parse(it.selectedOptions);
+              if (Array.isArray(parsed) && parsed.length > 0) chosen = parsed;
+            } catch {}
+          }
+          return {
+            sallaProductId: it.product.sallaId,
+            qty: it.qty,
+            options: chosen ?? defaultOptionsForProduct(it.product.raw),
+          };
+        }),
         shipping,
         courierId,
         acceptedMethods,

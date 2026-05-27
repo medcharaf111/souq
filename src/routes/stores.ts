@@ -35,6 +35,79 @@ router.post("/stores/:storeId/sync", async (req, res) => {
   }
 });
 
+interface RawProductOption {
+  id?: number | string;
+  name?: string;
+  type?: string;
+  required?: boolean;
+  purpose?: string;
+  values?: Array<{
+    id?: number | string;
+    name?: string;
+    is_out_of_stock?: boolean;
+    price?: { amount?: number; currency?: string };
+  }>;
+}
+
+function parseProductOptions(rawJson: string): Array<{
+  id: number;
+  name: string;
+  type: string;
+  required: boolean;
+  purpose: string | null;
+  values: Array<{ id: number; name: string; is_out_of_stock: boolean }>;
+}> {
+  try {
+    const parsed = JSON.parse(rawJson) as { options?: RawProductOption[] };
+    return (parsed.options ?? [])
+      .filter((o): o is Required<Pick<RawProductOption, "id">> & RawProductOption => o.id != null)
+      .map((o) => ({
+        id: Number(o.id),
+        name: o.name ?? "",
+        type: o.type ?? "radio",
+        required: !!o.required,
+        purpose: o.purpose ?? null,
+        values: (o.values ?? [])
+          .filter((v) => v.id != null)
+          .map((v) => ({
+            id: Number(v.id),
+            name: v.name ?? "",
+            is_out_of_stock: !!v.is_out_of_stock,
+          })),
+      }));
+  } catch {
+    return [];
+  }
+}
+
+// GET /api/stores/:storeId/products/:productId — single product with parsed
+// options. Used by the product detail page on the storefront.
+router.get("/stores/:storeId/products/:productId", async (req, res) => {
+  const { storeId, productId } = req.params;
+  const p = await prisma.product.findUnique({ where: { id: String(productId) } });
+  if (!p || p.storeId !== storeId) {
+    res.status(404).json({ error: "product not found" });
+    return;
+  }
+  res.json({
+    product: {
+      id: p.id,
+      salla_id: p.sallaId,
+      name: p.name,
+      sku: p.sku,
+      description: p.description,
+      price: { amount: p.priceAmount, currency: p.priceCurrency },
+      sale_price: p.salePriceAmount,
+      quantity: p.quantity,
+      status: p.status,
+      type: p.type,
+      url: p.productUrl,
+      image: p.imageUrl,
+      options: parseProductOptions(p.raw),
+    },
+  });
+});
+
 // GET /api/stores/:storeId/products — products from local cache.
 // Use ?live=1 to bypass cache (passthrough to Salla — debugging only).
 router.get("/stores/:storeId/products", async (req, res) => {

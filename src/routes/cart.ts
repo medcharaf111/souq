@@ -21,6 +21,17 @@ async function getOrCreateCart(customer: Customer): Promise<CartWithItems> {
   });
 }
 
+type SelectedOptions = Array<{ id: number; value: Array<string | number> }>;
+
+function parseSelectedOptions(json: string | null): SelectedOptions | null {
+  if (!json) return null;
+  try {
+    const parsed = JSON.parse(json);
+    if (Array.isArray(parsed)) return parsed as SelectedOptions;
+  } catch {}
+  return null;
+}
+
 function serializeCart(cart: CartWithItems) {
   let subtotal = 0;
   const currency = cart.items[0]?.product.priceCurrency ?? "SAR";
@@ -42,6 +53,7 @@ function serializeCart(cart: CartWithItems) {
       qty: it.qty,
       stock: it.product.quantity,
       status: it.product.status,
+      selected_options: parseSelectedOptions(it.selectedOptions),
     };
   });
   return {
@@ -63,11 +75,15 @@ router.get(
   })
 );
 
-// POST /api/cart/items   { product_id, qty? }
+// POST /api/cart/items   { product_id, qty?, options? }
 router.post(
   "/cart/items",
   requireAuth(async (req, res) => {
-    const { product_id, qty } = (req.body ?? {}) as { product_id?: string; qty?: number };
+    const { product_id, qty, options } = (req.body ?? {}) as {
+      product_id?: string;
+      qty?: number;
+      options?: SelectedOptions;
+    };
     if (!product_id) {
       res.status(400).json({ error: "product_id required" });
       return;
@@ -88,11 +104,23 @@ router.post(
       return;
     }
 
+    const selectedOptions =
+      Array.isArray(options) && options.length > 0 ? JSON.stringify(options) : null;
+
     const cart = await getOrCreateCart(req.customer);
     await prisma.cartItem.upsert({
       where: { cartId_productId: { cartId: cart.id, productId: product.id } },
-      update: { qty: { increment: requested } },
-      create: { cartId: cart.id, productId: product.id, qty: requested },
+      update: {
+        qty: { increment: requested },
+        // Replace options if the caller provided them; preserve existing otherwise.
+        ...(selectedOptions ? { selectedOptions } : {}),
+      },
+      create: {
+        cartId: cart.id,
+        productId: product.id,
+        qty: requested,
+        selectedOptions,
+      },
     });
 
     const refreshed = await prisma.cart.findUnique({
