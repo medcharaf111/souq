@@ -345,6 +345,27 @@ method, maybe surface a confirmation step before placing the order
 the order is placed and the method-specific copy on /order/confirmed is the
 recovery point.
 
+### `is_pending_payment: false` does NOT mean "paid"
+
+Critical Salla semantics gotcha. The order create response can return:
+```
+{ is_pending_payment: false, status.slug: "payment_pending", payment_method: null }
+```
+
+This looks contradictory but it's how Salla expresses "unpaid order created;
+the customer should visit `urls.checkout` to pick a method and pay." The
+`is_pending_payment` flag is more like "is there an immediate hosted-payment
+flow we built specifically for you" — and Salla returns `false` for it even on
+unpaid orders.
+
+**Fix in place**: Frontend's `CheckoutForm` redirects to `r.checkout_url`
+whenever the customer picked `payment_method: "online"`, regardless of the
+`is_pending_payment` flag. That's the URL where the customer picks a method
+and pays.
+
+The flag is still relevant for the COD path: `payment_method: "cod"` →
+always go to `/order/confirmed` and skip Salla.
+
 ### Variants disguised as non-required options
 
 A Salla product option can have `required: false` but `purpose: "variants"` —
