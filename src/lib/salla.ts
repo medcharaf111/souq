@@ -361,6 +361,8 @@ export interface CreateOrderResult {
   checkoutUrl: string | null;
   customerOrderUrl: string | null;
   isPendingPayment: boolean;
+  paymentMethod: string | null;        // e.g. "cod", "bank", "credit_card"
+  statusSlug: string | null;           // e.g. "pending", "payment_pending"
   total?: { amount: number; currency: string };
 }
 
@@ -478,6 +480,9 @@ export async function createSallaOrder(args: {
       id?: number | string;
       urls?: { checkout?: string; customer?: string };
       is_pending_payment?: boolean;
+      status?: { name?: string; slug?: string };
+      payment_method?: string;
+      payment?: { method?: string };
       total?: { amount?: number; currency?: string };
     };
   };
@@ -486,11 +491,29 @@ export async function createSallaOrder(args: {
     if (validation) throw validation;
     throw new Error(`Salla order creation failed: ${res.status} ${JSON.stringify(body)}`);
   }
+
+  // Log the full data object so we can see exactly what Salla returned —
+  // useful for understanding which payment_method got applied.
+  // Safe to leave on; doesn't include card details or anything sensitive.
+  console.log(
+    "[salla.order.created]",
+    JSON.stringify({
+      id: body.data.id,
+      is_pending_payment: body.data.is_pending_payment,
+      payment_method: body.data.payment_method,
+      payment_method_alt: body.data.payment?.method,
+      status: body.data.status,
+      accepted_sent: accepted,
+    })
+  );
+
   return {
     orderId: body.data.id.toString(),
     checkoutUrl: body.data.urls?.checkout ?? null,
     customerOrderUrl: body.data.urls?.customer ?? null,
     isPendingPayment: !!body.data.is_pending_payment,
+    paymentMethod: body.data.payment_method ?? body.data.payment?.method ?? null,
+    statusSlug: body.data.status?.slug ?? null,
     total: body.data.total?.amount && body.data.total.currency
       ? { amount: body.data.total.amount, currency: body.data.total.currency }
       : undefined,

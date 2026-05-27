@@ -144,6 +144,9 @@ router.post(
         checkout_url: order.checkoutUrl,
         customer_order_url: order.customerOrderUrl,
         is_pending_payment: order.isPendingPayment,
+        payment_method: order.paymentMethod,
+        status_slug: order.statusSlug,
+        requested_methods: acceptedMethods,
         total: order.total,
       });
     } catch (e) {
