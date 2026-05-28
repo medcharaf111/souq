@@ -365,15 +365,54 @@ Investigated and confirmed:
 
 Result: points accumulate but cannot be redeemed via our marketplace.
 
-Recovery options (none implemented):
+Recovery options:
 - **A** Accept earn-only for v1; communicate clearly to customers
-- **B** Investigate whether Salla's Customer Loyalty app can be configured to
-  auto-issue redeem coupons (e.g. "your points = a coupon code") which we
-  could pass via `coupon_code` at checkout
+- **B** Investigated and confirmed viable — see [Path B detail below]
 - **C** Big lift: set a random password during customer provisioning, store
   encrypted, expose a "log into Salla to redeem" step in our checkout. Needs
   Salla's customer-side auth flow + maybe their `accounts.salla.sa` OAuth for
   end-users (separate from the merchant OAuth we already have)
+
+#### Path B detail — the redemption flow that DOES work
+
+The full programmatic redemption is buildable via three chained API calls
+(plus the existing order create). Investigation results:
+
+| Endpoint | Status | Required scope |
+|---|---|---|
+| `POST /admin/v2/customers/loyalty/points` (type=minus to deduct) | ✅ exists | `customers.read_write` ← we already have |
+| `POST /admin/v2/coupons` (create amount-discount code) | ✅ exists | `marketing.read_write` ← need to add |
+| `GET /admin/v2/loyalty/program` (read points-to-SAR rate) | ✅ exists | `loyalties.read_write` ← need to add |
+| Order create with `coupon_code` field | ✅ verified | already covered |
+
+Implementation outline (NOT done):
+
+```
+Customer at /checkout picks "Use N points (= M SAR off)"
+       │
+       ▼
+Backend on POST /api/checkout, body includes redeem_points: N
+  1. (Optimistic order) POST /coupons → { code: "LOYALTY-<cust>-<ts>", type:"amount", amount: M, expiry_date: +1h }
+  2. Order payload includes coupon_code: "LOYALTY-..."
+  3. POST /orders → success ⇒ order created with discount applied
+  4. POST /customers/loyalty/points → { type:"minus", points: N, customers: [<id>], reason: "Order <id>" }
+  If step 3 fails → coupon expires in 1h, no points deducted (safe)
+  If step 4 fails AFTER step 3 succeeds → customer got the discount free; could
+    retry via a background job; or accept as edge-case loss
+```
+
+Estimated effort: 1–2 hours of focused work, broken down as:
+- ~30 min  Update Salla app scope list + merchant reinstall
+- ~30 min  Backend `redeemLoyaltyPoints()` helper + wire into checkout route
+- ~30 min  Frontend points-redemption UI on /checkout
+- ~30 min  Smoke testing (would need to seed real points on the test customer
+  via `POST /customers/loyalty/points type=plus`)
+
+Open implementation choices:
+- Conversion rate (points → SAR) — read from `/loyalty/program` config OR
+  hardcode (e.g., 10 points = 1 SAR; document as TODO)
+- Allow partial redemption or only fixed tiers (50 / 100 / 500 points)?
+- Show points-redemption only if customer has > some minimum balance
 
 ### Demo stores can't render the customer-facing payment form (platform-enforced)
 
