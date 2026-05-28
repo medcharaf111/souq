@@ -1,4 +1,5 @@
 import "dotenv/config";
+import "express-async-errors"; // patches Express 4 to route async throws to the error handler
 import express from "express";
 import cookieParser from "cookie-parser";
 import cors from "cors";
@@ -37,6 +38,18 @@ app.use("/api", loyaltyRouter);
 app.use("/api", oauthRouter);
 app.use("/api", storesRouter);
 app.use("/api", webhooksRouter);
+
+// Catch-all error handler. Express 4 doesn't auto-route async throws here, so
+// this mainly catches sync errors + anything explicitly passed to next(err).
+// The bigger protection against the "request hangs → 502" failure mode is the
+// Prisma connection retry in lib/prisma.ts.
+app.use(
+  (err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    console.error("[unhandled error]", err);
+    if (res.headersSent) return;
+    res.status(500).json({ error: "internal_error" });
+  }
+);
 
 const port = Number(process.env.PORT ?? 3000);
 app.listen(port, () => {
