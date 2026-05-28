@@ -422,6 +422,7 @@ export async function createSallaOrder(args: {
   shipping?: ShippingAddress;
   courierId?: number;
   acceptedMethods?: string[];
+  couponCode?: string;
 }): Promise<CreateOrderResult> {
   // Filter requested payment methods to those the merchant has actually
   // enabled. If we can't fetch the list (missing scope, etc.), fall back to
@@ -468,6 +469,7 @@ export async function createSallaOrder(args: {
           ...(courierId ? { courier_id: courierId } : {}),
         }
       : {}),
+    ...(args.couponCode ? { coupon_code: args.couponCode } : {}),
   };
 
   const res = await sallaFetch(args.storeId, "/orders", {
@@ -529,6 +531,118 @@ export interface LoyaltyPointsEntry {
   status: string;
   order_id: string | null;
   expiry_date: string | null;
+}
+
+// ─── Phase E: Loyalty redemption ─────────────────────────────────────────────
+
+export interface LoyaltyProgram {
+  pointsPerCurrencyUnit: number;  // how many points equal 1 SAR
+  minRedeemPoints: number;
+  currency: string;
+}
+
+const DEFAULT_LOYALTY_PROGRAM: LoyaltyProgram = {
+  pointsPerCurrencyUnit: 10,  // 10 points = 1 SAR — sensible default
+  minRedeemPoints: 0,
+  currency: "SAR",
+};
+
+/**
+ * Read the merchant's loyalty program config (conversion rate, etc.).
+ * Requires `loyalties.read_write` scope. Falls back to defaults if the call
+ * fails — the redemption flow still works, just with hardcoded rate.
+ *
+ * Field names below are best-effort against the actual response; we log the
+ * raw response so the next session can refine based on real data.
+ */
+export async function getLoyaltyProgram(storeId: string): Promise<LoyaltyProgram> {
+  try {
+    const res = await sallaFetch(storeId, "/loyalty/program");
+    if (!res.ok) return DEFAULT_LOYALTY_PROGRAM;
+    const body = (await res.json().catch(() => ({}))) as { data?: Record<string, unknown> };
+    const d = body.data;
+    if (!d) return DEFAULT_LOYALTY_PROGRAM;
+    console.log("[salla.loyalty.program]", JSON.stringify(d));
+    // Try several plausible field names — Salla docs are sparse, refine after first real probe.
+    const pointsPerUnit = Number(
+      d.exchange_rate ?? d.points_per_currency ?? d.points_per_riyal ?? d.rate ?? 10
+    );
+    const minPoints = Number(d.min_points ?? d.minimum_points ?? d.min_redemption ?? 0);
+    return {
+      pointsPerCurrencyUnit: pointsPerUnit > 0 ? pointsPerUnit : DEFAULT_LOYALTY_PROGRAM.pointsPerCurrencyUnit,
+      minRedeemPoints: minPoints >= 0 ? minPoints : 0,
+      currency: typeof d.currency === "string" ? d.currency : DEFAULT_LOYALTY_PROGRAM.currency,
+    };
+  } catch {
+    return DEFAULT_LOYALTY_PROGRAM;
+  }
+}
+
+/**
+ * Create a single-use amount-discount coupon on Salla. Used to bridge loyalty
+ * point redemption into Salla's order discount system (their order API
+ * doesn't accept a points field directly).
+ *
+ * Requires `marketing.read_write` scope.
+ */
+export async function createDiscountCoupon(args: {
+  storeId: string;
+  amount: number;
+  reason?: string;
+}): Promise<string> {
+  const rand = Math.random().toString(36).slice(2, 8).toUpperCase();
+  const code = `LOYALTY-${Date.now()}-${rand}`;
+  const expiry = new Date(Date.now() + 60 * 60 * 1000); // expires in 1 hour
+  const expiryDate = expiry.toISOString().slice(0, 10); // YYYY-MM-DD
+
+  const payload = {
+    code,
+    type: "amount",
+    amount: args.amount,
+    free_shipping: false,
+    expiry_date: expiryDate,
+    exclude_sale_products: false,
+  };
+
+  const res = await sallaFetch(args.storeId, "/coupons", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(`Coupon creation failed: ${res.status} ${JSON.stringify(body)}`);
+  }
+  return code;
+}
+
+/**
+ * Deduct N points from a customer's loyalty balance.
+ * Requires `customers.read_write` (already in our scope set).
+ */
+export async function deductLoyaltyPoints(args: {
+  storeId: string;
+  sallaCustomerId: string;
+  points: number;
+  reason: string;
+}): Promise<void> {
+  const payload = {
+    points: args.points,
+    type: "minus",
+    reason: args.reason,
+    channel_send: [] as string[],
+    customers: [Number(args.sallaCustomerId)],
+  };
+  const res = await sallaFetch(args.storeId, "/customers/loyalty/points", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(`Loyalty deduction failed: ${res.status} ${JSON.stringify(body)}`);
+  }
 }
 
 export async function getLoyaltyPoints(

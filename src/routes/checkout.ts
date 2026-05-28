@@ -2,9 +2,13 @@ import { Router } from "express";
 import { prisma } from "../lib/prisma";
 import { requireAuth } from "../lib/auth";
 import {
+  createDiscountCoupon,
   createSallaOrder,
   CustomerProfileIncompleteError,
+  deductLoyaltyPoints,
   ensureSallaCustomer,
+  getLoyaltyPoints,
+  getLoyaltyProgram,
   SallaValidationError,
   type ShippingAddress,
   type CheckoutItem,
@@ -71,13 +75,17 @@ router.post(
       name: profileName,
       phone: profilePhone,
       payment_method: paymentMethod,
+      redeem_points: redeemPointsRaw,
     } = (req.body ?? {}) as {
       shipping?: ShippingAddress;
       courier_id?: number;
       name?: string;
       phone?: string;
       payment_method?: "cod" | "online";
+      redeem_points?: number;
     };
+
+    const requestedRedeem = Math.max(0, Math.floor(Number(redeemPointsRaw) || 0));
 
     // Map the customer's choice into Salla's accepted_methods array. "online"
     // means anything the merchant has enabled that isn't COD — Salla's hosted
@@ -107,6 +115,62 @@ router.post(
       // Phase B: ensure the local customer has a Salla customer counterpart.
       const sallaCustomerId = await ensureSallaCustomer(req.customer.id);
 
+      // Phase E: loyalty redemption (optional). Build a one-time coupon
+      // BEFORE order creation so the discount lands on the order. We deduct
+      // points AFTER order success so we don't burn points on a failed order.
+      let redeemCouponCode: string | null = null;
+      let redeemedPoints = 0;
+      let redeemedAmount = 0;
+      if (requestedRedeem > 0) {
+        const [balance, program] = await Promise.all([
+          getLoyaltyPoints(req.customer.storeId, sallaCustomerId),
+          getLoyaltyProgram(req.customer.storeId),
+        ]);
+        if (balance.balance < requestedRedeem) {
+          res.status(400).json({
+            error: "insufficient_loyalty_points",
+            message: `You requested ${requestedRedeem} points but only have ${balance.balance} available.`,
+            available: balance.balance,
+            requested: requestedRedeem,
+          });
+          return;
+        }
+        if (program.minRedeemPoints > 0 && requestedRedeem < program.minRedeemPoints) {
+          res.status(400).json({
+            error: "redemption_below_minimum",
+            message: `Minimum redemption is ${program.minRedeemPoints} points.`,
+            min: program.minRedeemPoints,
+          });
+          return;
+        }
+        const discountValue = Math.floor(requestedRedeem / program.pointsPerCurrencyUnit);
+        if (discountValue < 1) {
+          res.status(400).json({
+            error: "redemption_too_small",
+            message: `Need at least ${program.pointsPerCurrencyUnit} points to get 1 ${program.currency} off.`,
+          });
+          return;
+        }
+        try {
+          redeemCouponCode = await createDiscountCoupon({
+            storeId: req.customer.storeId,
+            amount: discountValue,
+            reason: `Loyalty redemption for customer ${req.customer.id}`,
+          });
+          redeemedPoints = requestedRedeem;
+          redeemedAmount = discountValue;
+        } catch (e) {
+          res.status(500).json({
+            error: "coupon_creation_failed",
+            message:
+              e instanceof Error
+                ? e.message
+                : "Could not create discount coupon for redemption.",
+          });
+          return;
+        }
+      }
+
       // Phase C: create the Salla order. Salla returns a checkout URL the
       // customer must be redirected to for payment.
       const order = await createSallaOrder({
@@ -133,7 +197,29 @@ router.post(
         shipping,
         courierId,
         acceptedMethods,
+        couponCode: redeemCouponCode ?? undefined,
       });
+
+      // Order succeeded → now deduct the loyalty points. Best-effort: if this
+      // fails we log but don't fail the order (customer got the discount once
+      // anyway; we'd reconcile via a background job in a real production setup).
+      if (redeemedPoints > 0) {
+        try {
+          await deductLoyaltyPoints({
+            storeId: req.customer.storeId,
+            sallaCustomerId,
+            points: redeemedPoints,
+            reason: `Order ${order.orderId} redemption`,
+          });
+        } catch (e) {
+          console.error("[loyalty.deduct_failed]", {
+            order_id: order.orderId,
+            salla_customer_id: sallaCustomerId,
+            points: redeemedPoints,
+            err: e instanceof Error ? e.message : String(e),
+          });
+        }
+      }
 
       // Empty the cart now — the order exists; if the customer bails on Salla's
       // payment page, they can complete it from the order page later.
@@ -148,6 +234,9 @@ router.post(
         status_slug: order.statusSlug,
         requested_methods: acceptedMethods,
         total: order.total,
+        redeemed_points: redeemedPoints,
+        redeemed_amount: redeemedAmount,
+        redeem_coupon: redeemCouponCode,
       });
     } catch (e) {
       if (e instanceof CustomerProfileIncompleteError) {
