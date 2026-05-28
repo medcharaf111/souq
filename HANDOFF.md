@@ -345,6 +345,40 @@ method, maybe surface a confirmation step before placing the order
 the order is placed and the method-specific copy on /order/confirmed is the
 recovery point.
 
+### Demo stores can't render the customer-facing payment form (platform-enforced)
+
+**Critical discovery, confirmed via direct API probe**. The "store under
+maintenance" banner shown on `demostore.salla.sa/<slug>/...` URLs is NOT a
+toggleable maintenance setting. It's Salla's platform-level guard for stores
+with `type: "demo"`.
+
+What we verified:
+- `GET /admin/v2/store/info` returns `{ "type": "demo", "status": "active",
+  "verified": false, "licenses": { tax_number: null, commercial_number: null,
+  freelance_number: null } }` — the store is "active" in the data, no
+  maintenance flag exists.
+- `GET /admin/v2/settings?entity=store` returns exactly ONE setting:
+  `{ slug: "store.activities", type: "form" }`. There is no
+  `store.maintenance` setting on a demo store.
+- The Salla dashboard's "Maintenance Mode" panel hits
+  `/admin/v2/settings/fields/store.maintenance` and gets a 404 from Salla's
+  own backend — because that endpoint doesn't exist for demo stores.
+- Creating a fresh demo store reproduces the exact same behavior.
+
+Conclusion: **demo stores are admin-side functional but customer-side blocked**.
+- Orders ARE accepted via API (our integration works end-to-end)
+- The customer storefront shows the "under construction" banner regardless of
+  any merchant action
+- This is to prevent real payment processors from getting hit by test orders
+
+To **visually confirm the card payment form**, you need a real (non-demo)
+production merchant store with verified KYC + commercial registration. There
+is no workaround on the demo side.
+
+For the partner integration itself: nothing more to do. Real merchants will
+get the real payment form. Demo stores demonstrate that the integration
+works without enabling real money flow.
+
 ### `is_pending_payment: false` does NOT mean "paid"
 
 Critical Salla semantics gotcha. The order create response can return:
