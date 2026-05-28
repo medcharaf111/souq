@@ -345,6 +345,36 @@ method, maybe surface a confirmation step before placing the order
 the order is placed and the method-specific copy on /order/confirmed is the
 recovery point.
 
+### Loyalty redemption is not supported in our flow
+
+**Earning** loyalty points works fine — Salla auto-awards based on order amount;
+no customer auth needed; the points show up on `/account` via our existing
+read endpoint.
+
+**Redeeming** points at checkout is **not currently possible** in our flow.
+Investigated and confirmed:
+
+1. Salla's `POST /admin/v2/orders` payload does NOT accept any `loyalty_points`
+   or equivalent field. Only `coupon_code` exists for discount.
+2. Salla's `/customers/loyalty/points` endpoint is read-only — there is no
+   documented POST/PUT/PATCH to spend points programmatically.
+3. Salla's only redemption UX is "customer logs into merchant storefront,
+   applies points on the hosted checkout page." Our customers can't do this:
+   we provision them via `POST /admin/v2/customers` without setting a
+   password, so they cannot log in to Salla's storefront.
+
+Result: points accumulate but cannot be redeemed via our marketplace.
+
+Recovery options (none implemented):
+- **A** Accept earn-only for v1; communicate clearly to customers
+- **B** Investigate whether Salla's Customer Loyalty app can be configured to
+  auto-issue redeem coupons (e.g. "your points = a coupon code") which we
+  could pass via `coupon_code` at checkout
+- **C** Big lift: set a random password during customer provisioning, store
+  encrypted, expose a "log into Salla to redeem" step in our checkout. Needs
+  Salla's customer-side auth flow + maybe their `accounts.salla.sa` OAuth for
+  end-users (separate from the merchant OAuth we already have)
+
 ### Demo stores can't render the customer-facing payment form (platform-enforced)
 
 **Critical discovery, confirmed via direct API probe**. The "store under
@@ -478,6 +508,7 @@ cookie carries both `customerId` AND `storeId`, and we double-check on
 | Redirect to Salla checkout (Pay Online) | ✅ |
 | Payment method dynamic filter | ✅ (graceful no-op if `payments.read` not granted) |
 | Loyalty points display on /account | ✅ — needs merchant's Customer Loyalty app installed to show non-zero |
+| Loyalty points REDEMPTION at checkout | ❌ no path — see [loyalty redemption gap](#loyalty-redemption-is-not-supported-in-our-flow) |
 | Multi-merchant deployment via NEXT_PUBLIC_STORE_ID | ✅ |
 | Webhook signature verification | ❌ TODO — endpoint accepts any body |
 | Admin auth on /api/stores/* | ❌ TODO — unauthenticated |
