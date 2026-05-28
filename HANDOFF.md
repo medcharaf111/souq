@@ -193,7 +193,10 @@ frontend surfaces cleanly. To pick up the upgrade, the merchant should reinstall
 ```
 SALLA_CLIENT_ID                  (from partner portal)
 SALLA_CLIENT_SECRET              (from partner portal — rotated by user post-session)
-SALLA_SCOPES                     offline_access products.read settings.read customers.read_write orders.read_write shippings.read payments.read
+SALLA_SCOPES                     offline_access products.read settings.read customers.read_write orders.read_write shippings.read payments.read marketing.read_write loyalties.read_write
+                                 # marketing.read_write → coupon create (the loyalty discount).
+                                 # loyalties.read_write → loyalty point grant/deduct: live test shows POST /customers/loyalty/points 403s WITHOUT it
+                                 #   (one docs page says customers.read_write, but behavior + the /loyalty/program 401 indicate loyalties.*). Reads work with customers.read.
 BACKEND_URL                      https://web-production-f300.up.railway.app
 FRONTEND_URL                     https://souq-front.vercel.app
 JWT_SECRET                       (32-byte hex — rotated post-session)
@@ -345,74 +348,92 @@ method, maybe surface a confirmation step before placing the order
 the order is placed and the method-specific copy on /order/confirmed is the
 recovery point.
 
-### Loyalty redemption is not supported in our flow
+### Loyalty redemption — IMPLEMENTED (Path B), discount mechanism verified live
 
 **Earning** loyalty points works fine — Salla auto-awards based on order amount;
-no customer auth needed; the points show up on `/account` via our existing
-read endpoint.
+no customer auth needed; points show up on `/account` via our read endpoint.
 
-**Redeeming** points at checkout is **not currently possible** in our flow.
-Investigated and confirmed:
+**Redeeming** points at checkout is implemented end-to-end. The flow: customer
+passes `redeem_points: N` to `POST /api/checkout` → backend checks
+`availableToRedeem` (= Salla balance − points already spent in our local ledger)
+→ creates a one-time `fixed` coupon for the SAR equivalent → applies it on the
+Salla order via `coupon_code` → records the spend in the `Redemption` table. See
+`createDiscountCoupon` / `getRedeemableLoyalty` / `getLoyaltyProgram` in
+[`src/lib/salla.ts`](src/lib/salla.ts) and the redemption block in
+[`src/routes/checkout.ts`](src/routes/checkout.ts).
 
-1. Salla's `POST /admin/v2/orders` payload does NOT accept any `loyalty_points`
-   or equivalent field. Only `coupon_code` exists for discount.
-2. Salla's `/customers/loyalty/points` endpoint is read-only — there is no
-   documented POST/PUT/PATCH to spend points programmatically.
-3. Salla's only redemption UX is "customer logs into merchant storefront,
-   applies points on the hosted checkout page." Our customers can't do this:
-   we provision them via `POST /admin/v2/customers` without setting a
-   password, so they cannot log in to Salla's storefront.
+#### What is PROVEN live (2026-05-28, demo store 2141815737)
 
-Result: points accumulate but cannot be redeemed via our marketplace.
+- **Validation path**: `redeem_points` greater than balance → clean
+  `insufficient_loyalty_points` 400 (no coupon, no order).
+- **Discount lands on the order**: created a real order (id `1406841375`) for a
+  94-SAR product + 50-SAR shipping with a `fixed` 50-SAR coupon. Salla's order
+  `amounts.discounts` showed `{code, discount: "50.00"}` and total came out to
+  **94** (= 94 + 50 − 50). Without the coupon it would be 144. ✅
 
-Recovery options:
-- **A** Accept earn-only for v1; communicate clearly to customers
-- **B** Investigated and confirmed viable — see [Path B detail below]
-- **C** Big lift: set a random password during customer provisioning, store
-  encrypted, expose a "log into Salla to redeem" step in our checkout. Needs
-  Salla's customer-side auth flow + maybe their `accounts.salla.sa` OAuth for
-  end-users (separate from the merchant OAuth we already have)
+#### Two real bugs found & fixed during the smoke test
 
-#### Path B detail — the redemption flow that DOES work
+1. **Coupon `type`** — must be `"fixed"`, not `"amount"`. Salla's
+   `POST /coupons` rejects `"amount"` with 422 "invalid discount type".
+2. **Coupon `code` charset** — must be **alphanumeric only** (`[A-Z0-9]`).
+   `POST /coupons` accepts hyphens, but applying that code on an **order**
+   fails 422 "coupon code must contain only letters and numbers". The generator
+   now emits `LOYALTY<base36-ts><rand>` (no hyphens).
 
-The full programmatic redemption is buildable via three chained API calls
-(plus the existing order create). Investigation results:
+#### Why deduction uses a local ledger (Salla point-write is unavailable)
 
-| Endpoint | Status | Required scope |
+Salla's partner API will not let us deduct points. Investigated live on demo/dev
+store 2141815737 (merchant "Demo", `dev-…`, `@email.partners`):
+
+| Endpoint | Method | Result |
 |---|---|---|
-| `POST /admin/v2/customers/loyalty/points` (type=minus to deduct) | ✅ exists | `customers.read_write` ← we already have |
-| `POST /admin/v2/coupons` (create amount-discount code) | ✅ exists | `marketing.read_write` ← need to add |
-| `GET /admin/v2/loyalty/program` (read points-to-SAR rate) | ✅ exists | `loyalties.read_write` ← need to add |
-| Order create with `coupon_code` field | ✅ verified | already covered |
+| `/customers/loyalty/points` (read balance) | GET | ✅ 200 — works with `customers.read` |
+| `/customers/loyalty/points` (grant/deduct) | POST | ❌ **403 `ليس لديك صلاحية`** |
+| `/loyalty/program` (read points→SAR rate) | GET | ❌ 401 — "needs `loyalties.read, loyalties.read_write`" |
+| `/coupons` create+delete, `/orders` create, `/customers` create | POST | ✅ all succeed with current scopes |
 
-Implementation outline (NOT done):
+Ruled out: **program-inactive** (activated a full program — earn method + reward +
+reminder — still 403) and a **blanket demo-store write block** (orders/coupons/
+customers all write fine). The loyalty write is specifically gated: one docs page
+([Update Customer Loyalty Points](https://docs.salla.dev/12250579e0)) labels it
+`customers.read_write`, but live behavior + the `/loyalty/program` 401 show the
+loyalty domain sits behind **`loyalties.*`** — a reserved scope NOT selectable in
+the partner portal. Research confirmed there is no alternate write endpoint, no
+loyalty webhooks, and native redemption is storefront-only (logged-in customer).
+The Customer Wallet debit endpoint has the same allow-list gate.
 
-```
-Customer at /checkout picks "Use N points (= M SAR off)"
-       │
-       ▼
-Backend on POST /api/checkout, body includes redeem_points: N
-  1. (Optimistic order) POST /coupons → { code: "LOYALTY-<cust>-<ts>", type:"amount", amount: M, expiry_date: +1h }
-  2. Order payload includes coupon_code: "LOYALTY-..."
-  3. POST /orders → success ⇒ order created with discount applied
-  4. POST /customers/loyalty/points → { type:"minus", points: N, customers: [<id>], reason: "Order <id>" }
-  If step 3 fails → coupon expires in 1h, no points deducted (safe)
-  If step 4 fails AFTER step 3 succeeds → customer got the discount free; could
-    retry via a background job; or accept as edge-case loss
-```
+**Solution implemented — local redemption ledger** (`Redemption` model in
+[`prisma/schema.prisma`](prisma/schema.prisma)):
+- `getRedeemableLoyalty()` returns `available = sallaBalance − Σ(local Redemption.points)`.
+- Checkout validates against `available`, creates the coupon, and writes a
+  `Redemption` row on order success — **no Salla write**. `getLoyaltyPoints` stays
+  the Salla read; `GET /api/loyalty/points` now returns `balance` = net available,
+  plus `salla_balance` and `locally_redeemed`.
+- No double-count: Salla's read already nets its own `used_points`, and our spends
+  never reach Salla.
 
-Estimated effort: 1–2 hours of focused work, broken down as:
-- ~30 min  Update Salla app scope list + merchant reinstall
-- ~30 min  Backend `redeemLoyaltyPoints()` helper + wire into checkout route
-- ~30 min  Frontend points-redemption UI on /checkout
-- ~30 min  Smoke testing (would need to seed real points on the test customer
-  via `POST /customers/loyalty/points type=plus`)
+**Caveat (single-channel assumption):** since we never write to Salla, the
+merchant's Salla dashboard won't reflect app redemptions, and if the SAME customer
+also shops the merchant's native Salla storefront they could spend the same points
+there too. Fine for the one-app-per-merchant template model. If a merchant runs
+both channels, request Salla to allow-list the app for `customer-wallets.read_write`
+(documented wallet debit/credit) or `loyalties.read_write`, then switch the deduct
+to the real API.
 
-Open implementation choices:
-- Conversion rate (points → SAR) — read from `/loyalty/program` config OR
-  hardcode (e.g., 10 points = 1 SAR; document as TODO)
-- Allow partial redemption or only fixed tiers (50 / 100 / 500 points)?
-- Show points-redemption only if customer has > some minimum balance
+**Still to verify live:** a full redeem checkout (seed a non-zero Salla balance →
+redeem → confirm coupon on the order + a `Redemption` row + reduced `available`
+next time). Earlier blocked only by *seeding* — the grant write 403s too — so seed
+via the dashboard's manual point grant, or test on a store where the customer
+already has a balance.
+
+> Cleanup note: smoke-test coupons were deleted. One leftover **test order
+> `1406841375`** (pending COD, demo store) can be cancelled from the dashboard.
+
+Open implementation choices (unchanged):
+- Conversion rate (points → SAR) — currently default 10:1 until `loyalties.read`
+  lets us read `/loyalty/program`.
+- Partial redemption vs. fixed tiers (50 / 100 / 500 points)?
+- Show redemption UI only above a minimum balance (currently: only if balance > 0).
 
 ### Demo stores can't render the customer-facing payment form (platform-enforced)
 
@@ -547,7 +568,7 @@ cookie carries both `customerId` AND `storeId`, and we double-check on
 | Redirect to Salla checkout (Pay Online) | ✅ |
 | Payment method dynamic filter | ✅ (graceful no-op if `payments.read` not granted) |
 | Loyalty points display on /account | ✅ — needs merchant's Customer Loyalty app installed to show non-zero |
-| Loyalty points REDEMPTION at checkout | ❌ no path — see [loyalty redemption gap](#loyalty-redemption-is-not-supported-in-our-flow) |
+| Loyalty points REDEMPTION at checkout | ⚠️ implemented; discount proven live; deduct gated on `loyalties.read_write` scope — see [loyalty redemption](#loyalty-redemption--implemented-path-b-discount-mechanism-verified-live) |
 | Multi-merchant deployment via NEXT_PUBLIC_STORE_ID | ✅ |
 | Webhook signature verification | ❌ TODO — endpoint accepts any body |
 | Admin auth on /api/stores/* | ❌ TODO — unauthenticated |

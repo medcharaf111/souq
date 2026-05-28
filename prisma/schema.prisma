@@ -65,8 +65,29 @@ model Customer {
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
   cart            Cart?
+  redemptions     Redemption[]
 
   @@unique([storeId, email])
+  @@index([storeId])
+}
+
+// Local loyalty-redemption ledger. Salla's partner API does NOT allow deducting
+// points (POST /customers/loyalty/points 403s — that mutation sits behind a
+// reserved scope/allow-list we can't get). So we read the Salla balance and
+// track spends here instead: availableToRedeem = sallaBalance − sum(points here).
+model Redemption {
+  id         String   @id @default(cuid())
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  storeId    String
+  points     Int      // loyalty points spent in this redemption
+  amount     Float    // discount value granted, in `currency`
+  currency   String   @default("SAR")
+  couponCode String
+  orderId    String   // Salla order id the discount was applied to
+  createdAt  DateTime @default(now())
+
+  @@index([customerId])
   @@index([storeId])
 }
 

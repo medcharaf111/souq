@@ -591,13 +591,18 @@ export async function createDiscountCoupon(args: {
   reason?: string;
 }): Promise<string> {
   const rand = Math.random().toString(36).slice(2, 8).toUpperCase();
-  const code = `LOYALTY-${Date.now()}-${rand}`;
+  // Salla's ORDER endpoint rejects coupon codes containing anything but letters
+  // and numbers ("must contain only letters and numbers"), even though coupon
+  // CREATION happily accepts hyphens. Keep the generated code strictly [A-Z0-9].
+  const code = `LOYALTY${Date.now().toString(36).toUpperCase()}${rand}`;
   const expiry = new Date(Date.now() + 60 * 60 * 1000); // expires in 1 hour
   const expiryDate = expiry.toISOString().slice(0, 10); // YYYY-MM-DD
 
   const payload = {
     code,
-    type: "amount",
+    // Salla accepts only "fixed" | "percentage"; "amount" is rejected with a
+    // 422 "invalid discount type". "fixed" = flat currency-amount off.
+    type: "fixed",
     amount: args.amount,
     free_shipping: false,
     expiry_date: expiryDate,
@@ -617,33 +622,12 @@ export async function createDiscountCoupon(args: {
   return code;
 }
 
-/**
- * Deduct N points from a customer's loyalty balance.
- * Requires `customers.read_write` (already in our scope set).
- */
-export async function deductLoyaltyPoints(args: {
-  storeId: string;
-  sallaCustomerId: string;
-  points: number;
-  reason: string;
-}): Promise<void> {
-  const payload = {
-    points: args.points,
-    type: "minus",
-    reason: args.reason,
-    channel_send: [] as string[],
-    customers: [Number(args.sallaCustomerId)],
-  };
-  const res = await sallaFetch(args.storeId, "/customers/loyalty/points", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error(`Loyalty deduction failed: ${res.status} ${JSON.stringify(body)}`);
-  }
-}
+// NOTE: there is intentionally no deductLoyaltyPoints helper. Salla's partner
+// API rejects loyalty-point writes (POST /customers/loyalty/points → 403
+// "ليس لديك صلاحية" even with customers.read_write + an active program; the
+// mutation sits behind the reserved loyalties.* scope / an app allow-list we
+// can't obtain). Spends are tracked in the local Redemption ledger instead —
+// see getRedeemableLoyalty below and the Redemption model.
 
 export async function getLoyaltyPoints(
   storeId: string,
@@ -676,4 +660,39 @@ export async function getLoyaltyPoints(
     usedTotal += e.used_points;
   }
   return { entries, balance, usedTotal };
+}
+
+/**
+ * Net redeemable points = Salla balance − points already spent through our local
+ * ledger (Redemption model). Salla can't deduct via the partner API, so the
+ * ledger is the source of truth for spends made through this app. Salla's read
+ * balance already nets out its own `used_points`, and our spends never reach
+ * Salla, so there is no double-counting.
+ */
+export async function getRedeemableLoyalty(args: {
+  storeId: string;
+  sallaCustomerId: string;
+  localCustomerId: string;
+}): Promise<{
+  sallaBalance: number;
+  locallyRedeemed: number;
+  available: number;
+  usedTotal: number;
+  entries: LoyaltyPointsEntry[];
+}> {
+  const [salla, agg] = await Promise.all([
+    getLoyaltyPoints(args.storeId, args.sallaCustomerId),
+    prisma.redemption.aggregate({
+      _sum: { points: true },
+      where: { customerId: args.localCustomerId },
+    }),
+  ]);
+  const locallyRedeemed = agg._sum.points ?? 0;
+  return {
+    sallaBalance: salla.balance,
+    locallyRedeemed,
+    available: Math.max(0, salla.balance - locallyRedeemed),
+    usedTotal: salla.usedTotal,
+    entries: salla.entries,
+  };
 }

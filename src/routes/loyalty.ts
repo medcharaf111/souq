@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { requireAuth } from "../lib/auth";
-import { ensureSallaCustomer, getLoyaltyPoints } from "../lib/salla";
+import { ensureSallaCustomer, getRedeemableLoyalty } from "../lib/salla";
 
 const router = Router();
 
@@ -13,9 +13,15 @@ router.get(
   requireAuth(async (req, res) => {
     try {
       const sallaCustomerId = await ensureSallaCustomer(req.customer.id);
-      const result = await getLoyaltyPoints(req.customer.storeId, sallaCustomerId);
+      const result = await getRedeemableLoyalty({
+        storeId: req.customer.storeId,
+        sallaCustomerId,
+        localCustomerId: req.customer.id,
+      });
       res.json({
-        balance: result.balance,
+        balance: result.available, // net = Salla balance − points spent in-app
+        salla_balance: result.sallaBalance,
+        locally_redeemed: result.locallyRedeemed,
         used_total: result.usedTotal,
         entries: result.entries,
       });

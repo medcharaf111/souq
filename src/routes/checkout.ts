@@ -5,10 +5,9 @@ import {
   createDiscountCoupon,
   createSallaOrder,
   CustomerProfileIncompleteError,
-  deductLoyaltyPoints,
   ensureSallaCustomer,
-  getLoyaltyPoints,
   getLoyaltyProgram,
+  getRedeemableLoyalty,
   SallaValidationError,
   type ShippingAddress,
   type CheckoutItem,
@@ -116,21 +115,27 @@ router.post(
       const sallaCustomerId = await ensureSallaCustomer(req.customer.id);
 
       // Phase E: loyalty redemption (optional). Build a one-time coupon
-      // BEFORE order creation so the discount lands on the order. We deduct
-      // points AFTER order success so we don't burn points on a failed order.
+      // BEFORE order creation so the discount lands on the order. We record the
+      // spend in our local ledger AFTER order success so we don't burn points on
+      // a failed order. (Salla can't deduct via the partner API — see salla.ts.)
       let redeemCouponCode: string | null = null;
       let redeemedPoints = 0;
       let redeemedAmount = 0;
+      let redeemedCurrency = "SAR";
       if (requestedRedeem > 0) {
-        const [balance, program] = await Promise.all([
-          getLoyaltyPoints(req.customer.storeId, sallaCustomerId),
+        const [loyalty, program] = await Promise.all([
+          getRedeemableLoyalty({
+            storeId: req.customer.storeId,
+            sallaCustomerId,
+            localCustomerId: req.customer.id,
+          }),
           getLoyaltyProgram(req.customer.storeId),
         ]);
-        if (balance.balance < requestedRedeem) {
+        if (loyalty.available < requestedRedeem) {
           res.status(400).json({
             error: "insufficient_loyalty_points",
-            message: `You requested ${requestedRedeem} points but only have ${balance.balance} available.`,
-            available: balance.balance,
+            message: `You requested ${requestedRedeem} points but only have ${loyalty.available} available.`,
+            available: loyalty.available,
             requested: requestedRedeem,
           });
           return;
@@ -159,6 +164,7 @@ router.post(
           });
           redeemedPoints = requestedRedeem;
           redeemedAmount = discountValue;
+          redeemedCurrency = program.currency;
         } catch (e) {
           res.status(500).json({
             error: "coupon_creation_failed",
@@ -200,21 +206,27 @@ router.post(
         couponCode: redeemCouponCode ?? undefined,
       });
 
-      // Order succeeded → now deduct the loyalty points. Best-effort: if this
-      // fails we log but don't fail the order (customer got the discount once
-      // anyway; we'd reconcile via a background job in a real production setup).
-      if (redeemedPoints > 0) {
+      // Order succeeded → record the spend in our local ledger (Salla can't
+      // deduct via the partner API). This is what keeps the next checkout's
+      // availableToRedeem correct. Best-effort log on failure so a ledger hiccup
+      // doesn't fail an order that's already been placed.
+      if (redeemedPoints > 0 && redeemCouponCode) {
         try {
-          await deductLoyaltyPoints({
-            storeId: req.customer.storeId,
-            sallaCustomerId,
-            points: redeemedPoints,
-            reason: `Order ${order.orderId} redemption`,
+          await prisma.redemption.create({
+            data: {
+              customerId: req.customer.id,
+              storeId: req.customer.storeId,
+              points: redeemedPoints,
+              amount: redeemedAmount,
+              currency: redeemedCurrency,
+              couponCode: redeemCouponCode,
+              orderId: order.orderId,
+            },
           });
         } catch (e) {
-          console.error("[loyalty.deduct_failed]", {
+          console.error("[loyalty.redemption_record_failed]", {
             order_id: order.orderId,
-            salla_customer_id: sallaCustomerId,
+            customer_id: req.customer.id,
             points: redeemedPoints,
             err: e instanceof Error ? e.message : String(e),
           });
